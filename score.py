@@ -9,8 +9,9 @@ from surprise import KNNBasic
 import os
 import urllib.request
 import requests
+import threading
 
-def get_data(model):
+def get_test_set():
     # manually downloading the file, as it requires a prompt otherwise
     url='http://files.grouplens.org/datasets/movielens/ml-100k.zip'
     DATASETS_DIR = os.path.expanduser('~') + '/.surprise_data/'
@@ -29,6 +30,11 @@ def get_data(model):
     data = Dataset.load_builtin(name)
     trainingSet = data.build_full_trainset()
     testSet = trainingSet.build_anti_testset()
+
+    return testSet
+    
+
+def get_data(model, testSet):
     predictions = model.test(testSet)
 
     return predictions
@@ -77,6 +83,15 @@ def fetchVariationKey(uid):
         print(restResponse.raise_for_status())
         return None
 
+def top3_recommendations(modelName, modelFileName, test_set):
+    
+    print("Predicting corresponding to model : " + modelName)
+    model_path = os.path.join(Model.get_model_path('outputs'), modelFileName) 
+    model = joblib.load(model_path)
+    predictions = get_data(model, test_set)
+    top3_recommendations = get_top3_recommendations(predictions)
+    modelRecommendationByName[modelName] = top3_recommendations
+
 def init():
     global modelRecommendationByName
     global rid_to_name
@@ -89,15 +104,26 @@ def init():
 
     modelRecommendationByName = {}
 
+    test_set = get_test_set()
+    threads = []
+
     for modelName, modelFileName in modelFileByName.items():
+        t = threading.Thread(target=top3_recommendations, args=(modelName, modelFileName))
+        t.start()
+        threads.append(t)
+        """
         print("Predicting corresponding to model : " + modelName)
         model_path = os.path.join(Model.get_model_path('outputs'), modelFileName) 
         model = joblib.load(model_path)
-        predictions = get_data(model)
-        top3_recommendations = get_top3_recommendations(predictions)
-        modelRecommendationByName[modelName] = top3_recommendations
+        #predictions = get_data(model, test_set)
+        #top3_recommendations = get_top3_recommendations(predictions)
+        #modelRecommendationByName[modelName] = top3_recommendations"""
     
     rid_to_name = read_item_names()
+
+    # Wait for all threads
+    for thread in threads:
+        thread.join()
 
 def run(raw_data):
 
