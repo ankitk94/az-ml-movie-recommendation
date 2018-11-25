@@ -8,8 +8,10 @@ from surprise import Dataset, evaluate
 from surprise import KNNBasic
 import os
 import urllib.request
+import requests
+import multiprocessing
 
-def get_data():
+def get_test_set():
     # manually downloading the file, as it requires a prompt otherwise
     url='http://files.grouplens.org/datasets/movielens/ml-100k.zip'
     DATASETS_DIR = os.path.expanduser('~') + '/.surprise_data/'
@@ -28,6 +30,11 @@ def get_data():
     data = Dataset.load_builtin(name)
     trainingSet = data.build_full_trainset()
     testSet = trainingSet.build_anti_testset()
+
+    return testSet
+    
+
+def get_data(model, testSet):
     predictions = model.test(testSet)
 
     return predictions
@@ -36,7 +43,7 @@ def get_data():
 from collections import defaultdict
  
 def get_top3_recommendations(predictions, topN = 3):
-     
+
     top_recs = defaultdict(list)
     for uid, iid, true_r, est, _ in predictions:
         top_recs[uid].append((iid, est))
@@ -64,28 +71,89 @@ def read_item_names():
  
     return rid_to_name
 
+def fetchVariationKey(uid):
+    url = "https://optimizelyintegration.azurewebsites.net/azurepipelinesoptimizely/variation?uid=" + str(uid)
+    restResponse =  requests.get(url)
 
+    if (restResponse.ok):
+        key = restResponse.content.decode('utf-8')
+        print("Variation key assigned :" + str(key))
+        return key
+    else:
+        print(restResponse.raise_for_status())
+        return None
+
+def top3_recommendations(modelName, modelFileName, test_set, q):
+    
+    print("Predicting corresponding to model : " + modelName)
+    model_path = os.path.join(Model.get_model_path('outputs'), modelFileName) 
+    model = joblib.load(model_path)
+    predictions = get_data(model, test_set)
+    print("Got predictions")
+    top3_recommendations = get_top3_recommendations(predictions)
+    q.put(top3_recommendations)
+    print("Function ended")
+    #modelRecommendationByName[modelName] = top3_recommendations
 
 def init():
-    global model
-    global top3_recommendations
+    global modelRecommendationByName
     global rid_to_name
+
+    modelFileByName = {
+        "modelA" : "model1.pkl",
+        "modelB" : "model2.pkl",
+        "modelC" : "model3.pkl"
+    }
+
+    modelRecommendationByName = {}
+
+
+    test_set = get_test_set()
+    threads = []
+    q = multiprocessing.Queue()
+
+    for modelName, modelFileName in modelFileByName.items():
+        t = multiprocessing.Process(name=modelName, target=top3_recommendations, args=(modelName, modelFileName, test_set.copy(), q))
+        t.start()
+        threads.append(t)
+        """
+        print("Predicting corresponding to model : " + modelName)
+        model_path = os.path.join(Model.get_model_path('outputs'), modelFileName) 
+        model = joblib.load(model_path)
+        #predictions = get_data(model, test_set)
+        #top3_recommendations = get_top3_recommendations(predictions)
+        #modelRecommendationByName[modelName] = top3_recommendations"""
     
-    model_path = Model.get_model_path("model.pkl")
-    model = joblib.load(model_path)
-    predictions = get_data()
-    top3_recommendations = get_top3_recommendations(predictions)
-    rid_to_name = read_item_names() 
+    rid_to_name = read_item_names()
+    for t in threads:
+        modelRecommendationByName[t.name] = q.get()
+        
+    # Wait for all threads
+    for thread in threads:
+        print("In loop of join")
+        thread.join()
+        print("Join lopp over")
 
 def run(raw_data):
 
     # data here is uid
-    data = json.loads(raw_data)['uid']
+    jsonData = json.loads(raw_data)
+    userUid = jsonData['uid']
+
+    # Integegration with optimizely
+    # variationKey = azurePipelineOptimizelySdk.getVariationKey(userUid)
+    variationKey = fetchVariationKey(userUid)
+    if variationKey is None:
+        variationKey = list(modelRecommendationByName.keys())[0]
+    top3_recommendations = modelRecommendationByName[variationKey]
+
     #data = numpy.array(data)
+    result = None
     for uid, user_ratings in top3_recommendations.items():
         try:
-            if str(uid) == str(data):
-                result = str((uid, [rid_to_name[iid] for (iid, _) in user_ratings]))
+            if str(uid) == str(userUid):
+                result = str((uid, variationKey, [rid_to_name[iid] for (iid, _) in user_ratings]))
+                break
         except Exception as e:
             result = str(e)
     return json.dumps({"result": result})
